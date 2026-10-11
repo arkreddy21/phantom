@@ -1,0 +1,35 @@
+services:
+  phantom:
+    image: ${PHANTOM_IMAGE:?Set PHANTOM_IMAGE to an immutable published image}
+    platform: ${PHANTOM_PLATFORM:-linux/arm64}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3001"
+      DATA_DIR: /app/data
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://phantom.example.com}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:${PHANTOM_PORT:-3100}:3001"
+    volumes:
+      - phantom-data:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  phantom-data:
+    name: phantom-data

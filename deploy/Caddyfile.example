@@ -1,0 +1,8 @@
+# Replace USER and HASH_PLACEHOLDER with credentials created using `caddy hash-password`.
+# Do not commit real usernames or password hashes.
+phantom.example.com {
+	basic_auth {
+		USER HASH_PLACEHOLDER
+	}
+	reverse_proxy 127.0.0.1:3100
+}

@@ -58,3 +58,42 @@ The backend, browser suite, and production smoke were validated by their
 implementation lanes and reconciled by the orchestrator. Sound is synthesized;
 automated browser checks do not establish subjective audio similarity. Firefox,
 Safari, internet deployment, and authentication remain outside this evidence.
+
+## Deployment evidence — 2026-10-11
+
+The deployment change adds a distinct verification boundary: internal HTTP
+requests behind public HTTPS must be accepted only for the configured public
+origin, persistent data must outlive a container, and failed upgrades must not
+silently discard the old image/configuration.
+
+- API implementer: 13 API tests passed, including HTTPS origin acceptance,
+  invalid configured origins, wrong/null origins, and forwarded-header spoofing.
+- Orchestrator: client/server typechecks, 13 API tests, production build, and the
+  existing Chromium acceptance scenario passed after the origin change.
+- Deployment implementer: Bash syntax and mocked deploy failure/state tests.
+  These establish script control flow, not actual Docker behavior.
+- Workflow validation: upstream action SHA references checked; `actionlint`
+  passed. ARM64 image startup was subsequently checked under emulation; native
+  ARM64 verification remains pending as noted below.
+- Reviewer: independent security/data-integrity review identified rollback
+  configuration and image-state persistence error paths; corrections are covered
+  by deployment-script tests.
+
+## Docker evidence — 2026-10-12
+
+- Both `linux/amd64` and `linux/arm64` images built from the current tree.
+- `bash tests/container/smoke.sh` passed for both architectures: API health,
+  production HTML/assets, accepted/rejected origins, backup export/import,
+  nonroot/read-only execution, tmpfs, dropped capabilities, CPU/memory limits,
+  and dated journal content surviving container recreation with a named volume.
+- Real ARM64 Compose startup, entry persistence after force-recreation, and
+  `backup.sh` JSON validation and permissions (file `0600`, directory `0700`)
+  passed with isolated test resources. Compose configuration validation passed.
+- Client/server typechecks, 13 API tests, 12 mocked deployment tests, production
+  build, Chromium acceptance, and workflow linting passed.
+- Private build-context directories were excluded and absent from the image.
+
+ARM64 runtime checks used emulation on an x86-64 host, not native ARM hardware.
+No remote SSH connection, GHCR publication, DNS change, or Caddy reload was
+performed. The manual live checks in `docs/deployment.md` remain required before
+claiming live deployment.

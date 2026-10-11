@@ -54,7 +54,15 @@ writes; it is not a substitute for authentication.
 Social stats currently accumulate points without rank thresholds or an upper
 rank. Rank progression is intentionally deferred.
 
-## Development
+## Deployment
+
+The deployment example targets an ARM64 Docker host, with GitHub Actions and
+GHCR publishing an image and host-installed Caddy providing HTTPS and temporary
+access protection. See the [deployment guide](docs/deployment.md) for setup,
+SSH secrets, DNS, persistent storage, and recovery instructions. Replace the
+example hostname, image name, and host settings with values for your deployment.
+
+## Development checks
 
 ```sh
 pnpm typecheck
