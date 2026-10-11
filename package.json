@@ -1,0 +1,40 @@
+{
+  "name": "persona",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,green \"pnpm dev:server\" \"vite --host 127.0.0.1\"",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "pnpm typecheck:server && tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/server/index.js",
+    "typecheck": "pnpm typecheck:client && pnpm typecheck:server",
+    "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
+    "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.6",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
