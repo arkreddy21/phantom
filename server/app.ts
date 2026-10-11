@@ -7,9 +7,10 @@ import type { DailyEntry, Habit, Reward, Stat } from '../shared/types.js';
 import { createDatabase, readBackup, readState, restoreBackup } from './database.js';
 import { entryUpdateSchema, habitCreateSchema, habitPatchSchema, isoDate, localDateString, statCreateSchema, statPatchSchema } from './validation.js';
 
-type AppOptions = { database?: DatabaseSync; databasePath?: string; production?: boolean; clientDirectory?: string };
+type AppOptions = { database?: DatabaseSync; databasePath?: string; production?: boolean; clientDirectory?: string; publicOrigin?: string };
 
 export function createApp(options: AppOptions = {}) {
+  const publicOrigin = options.publicOrigin === undefined ? undefined : normalizePublicOrigin(options.publicOrigin);
   const db = options.database ?? createDatabase(options.databasePath ?? './data/persona.sqlite');
   const app = express();
   app.disable('x-powered-by');
@@ -18,6 +19,12 @@ export function createApp(options: AppOptions = {}) {
     if (origin) {
       try {
         const originUrl = new URL(origin);
+        if (publicOrigin !== undefined) {
+          if (normalizePublicOrigin(origin) !== publicOrigin) {
+            return res.status(403).json({ error: 'Cross-origin requests are not allowed' });
+          }
+          return next();
+        }
         const requestUrl = new URL(`${req.protocol}://${req.get('host')}`);
         const localHosts = new Set(['localhost', '127.0.0.1', '::1']);
         const developmentProxy = !options.production &&
@@ -169,6 +176,21 @@ export function createApp(options: AppOptions = {}) {
   };
   app.use(errorHandler);
   return { app, db };
+}
+
+function normalizePublicOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('PUBLIC_ORIGIN must be an http or https origin');
+  }
+  if (value !== value.trim() || !/^https?:\/\/[^/?#]+\/?$/i.test(value) ||
+      (url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password ||
+      (url.pathname !== '' && url.pathname !== '/') || url.search || url.hash) {
+    throw new Error('PUBLIC_ORIGIN must be an http or https origin with no credentials, path, query, or fragment');
+  }
+  return url.origin;
 }
 
 function exists(db: DatabaseSync, table: 'stats' | 'habits', id: string): boolean {

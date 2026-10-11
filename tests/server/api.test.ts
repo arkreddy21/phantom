@@ -126,6 +126,44 @@ describe('server API', () => {
     expect(denied.body).toEqual({ error: 'Cross-origin requests are not allowed' });
   });
 
+  it('uses the configured public origin behind an HTTP reverse proxy without trusting forwarded headers', async () => {
+    const configuredServer = createServer(createApp({ database: db, publicOrigin: 'https://phantom.example.com' }).app);
+    await new Promise<void>((resolve) => configuredServer.listen(0, '127.0.0.1', resolve));
+    const address = configuredServer.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+    const url = `http://127.0.0.1:${address.port}`;
+    const write = (origin: string, extraHeaders: Record<string, string> = {}) => fetch(`${url}/api/stats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, ...extraHeaders },
+      body: JSON.stringify({ name: 'Proxy stat', color: '#123456' }),
+    });
+
+    try {
+      expect((await write('https://phantom.example.com')).status).toBe(201);
+      expect((await write('https://wrong.example')).status).toBe(403);
+      expect((await write('null')).status).toBe(403);
+      expect((await write('https://wrong.example', {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'phantom.example.com',
+      })).status).toBe(403);
+      expect((await fetch(`${url}/api/health`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve, reject) => configuredServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('rejects invalid configured public origins when creating the app', () => {
+    for (const publicOrigin of [
+      'ftp://phantom.example.com',
+      'https://user:pass@phantom.example.com',
+      'https://phantom.example.com/path',
+      'https://phantom.example.com?query=1',
+      'https://phantom.example.com#fragment',
+    ]) {
+      expect(() => createApp({ database: db, publicOrigin })).toThrow(/PUBLIC_ORIGIN/);
+    }
+  });
+
   it('returns a JSON API 404 for unknown endpoints', async () => {
     const { response, body } = await request('/api/no-such-endpoint');
     expect(response.status).toBe(404);

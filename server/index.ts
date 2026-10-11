@@ -9,6 +9,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.HOST) {
 const { app, db } = createApp({
   databasePath: databasePathFromEnvironment(),
   production: process.argv.includes('--production') || process.env.NODE_ENV === 'production',
+  publicOrigin: process.env.PUBLIC_ORIGIN,
 });
 const host = process.env.HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 3001);
