@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n server,client -c blue,green \"pnpm dev:server\" \"vite --host 127.0.0.1\"",
     "dev:server": "tsx watch server/index.ts",
     "build": "pnpm typecheck:server && tsc -p tsconfig.server.json && vite build",
-    "start": "node dist/server/server/index.js",
+    "start": "node dist/server/server/index.js --production",
     "typecheck": "pnpm typecheck:client && pnpm typecheck:server",
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
