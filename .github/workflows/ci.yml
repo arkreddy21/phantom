@@ -177,10 +177,22 @@ jobs:
             }
           '
 
+      # Keep consumers of :latest on the previous tested image until smoke tests
+      # pass. The immutable SHA tag and digest remain available on failed smoke.
+      - name: Promote tested image to latest
+        env:
+          IMAGE: ${{ steps.metadata.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]] || { echo 'Invalid image repository' >&2; exit 2; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Invalid image digest' >&2; exit 2; }
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+
   deploy:
     name: Deploy production
     needs: publish
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.AUTO_DEPLOY == 'true'
     runs-on: ubuntu-24.04-arm
     environment: production
     permissions:
