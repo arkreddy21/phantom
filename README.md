@@ -11,15 +11,15 @@ Install a recent Node version supporting `node:sqlite` (Node 22.13+; the current
 project is developed on Node 26) and pnpm.
 
 ```sh
+cp .env.example .env
+# Edit .env and replace AUTH_USERNAME and AUTH_PASSWORD with strong values.
 pnpm install
-export AUTH_USERNAME='your-username'
-export AUTH_PASSWORD='your-long-random-password'
 pnpm dev
 ```
 
-The application login is required. The development server does not load `.env`
-files automatically, so export both variables in your shell before starting it.
-Choose a strong password and do not commit it.
+The application loads `.env` for `pnpm dev`; shell variables you already
+exported take precedence. The application login is required. Choose a strong
+password and do not commit `.env`.
 
 Open the local URL printed by Vite (normally `http://localhost:5173`). The dev
 API runs on port 3001. The database is created automatically in `data/`; it is
@@ -27,20 +27,45 @@ ignored by Git. Keep that directory when restarting or upgrading the app.
 
 ## Production
 
+### Docker Compose (recommended for self-hosting)
+
+For a Linux server, start with the [Docker deployment guide](docs/deployment.md).
+It includes a complete Compose file and `.env` example, plus commands to pull
+and start the published image. The CI-published image is currently **ARM64
+only**. An x86-64 server must build the image locally; do not expect the
+published image to run on it.
+
+Docker keeps the application and its runtime together. The database must live
+in a persistent Docker volume so it survives container replacement. Do not
+expose the application directly to the internet: use the required application
+login and, for remote access, HTTPS through a reverse proxy.
+
+### Run from source
+
+Use this option when developing or when you prefer to build and run the Node.js
+application directly. Install Node 22.13+ (Node 26 is used for development) and
+pnpm, then create a private environment file and edit the credentials:
+
 ```sh
+cp .env.example .env
+# Edit .env and replace AUTH_USERNAME and AUTH_PASSWORD with strong values.
+pnpm install
 pnpm build
 pnpm start
 ```
 
-The server serves the built client and API together. Configure the writable data
-directory and server settings using the variables in `.env.example` (set them in
-your runtime environment). A persistent disk is required; ephemeral deployment
-storage will lose data. This application is **not suitable for a static host**.
+The server serves the built client and API together on port 3001. The application
+loads `.env` for `pnpm dev` and `pnpm start`; shell variables you already exported
+take precedence. Keep `.env` private and do not commit it. The database defaults
+to `data/`; keep that directory and back it up. A persistent disk is required:
+ephemeral deployment storage will lose data. This application is **not suitable
+for a static host**.
 
-**Do not expose the server directly to the internet.** Configure the required
-single-owner `AUTH_USERNAME` and `AUTH_PASSWORD`, and use HTTPS through a reverse
-proxy for remote access. Origin validation prevents some browser cross-origin
-writes; it is not a substitute for authentication.
+For remote access, put an HTTPS reverse proxy in front of the app and configure
+`PUBLIC_ORIGIN` to the exact HTTPS origin. Set `AUTH_TRUST_PROXY=1` only when the
+app is reachable exclusively through one trusted proxy hop. Origin validation
+prevents some browser cross-origin writes; it is not a substitute for
+authentication.
 
 ## Daily use
 
@@ -59,13 +84,11 @@ writes; it is not a substitute for authentication.
 Social stats currently accumulate points without rank thresholds or an upper
 rank. Rank progression is intentionally deferred.
 
-## Deployment
+## Self-hosting
 
-The deployment example targets an ARM64 Docker host, with GitHub Actions and
-GHCR publishing an image and host-installed Caddy providing HTTPS. See the
-[deployment guide](docs/deployment.md) for setup,
-SSH secrets, DNS, persistent storage, and recovery instructions. Replace the
-example hostname, image name, and host settings with values for your deployment.
+See the [deployment guide](docs/deployment.md) for generic Docker Compose and
+HTTPS reverse-proxy instructions. It does not require GitHub-to-server SSH
+deployment; updates can be pulled and started manually.
 
 ## Development checks
 

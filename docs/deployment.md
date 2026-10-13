@@ -1,115 +1,48 @@
-# Deploy Phantom: beginner's guide
+# Self-host Phantom with Docker Compose
 
-This guide deploys Phantom to an ARM64 Linux server and puts Caddy in front of
-it for HTTPS. Phantom requires its own single-owner username and password. The
-examples use `phantom.example.com`,
-`ghcr.io/example/phantom`, and a `~/phantom` folder. Replace these placeholders
-with your own values.
+The published CI image is currently **ARM64 only**. Check the server architecture
+with `uname -m`: `aarch64` is ARM64, while `x86_64` is 64-bit x86. An x86-64
+server cannot run the ARM64 image; use the local x86 build instructions below.
 
-## First, understand the three places involved
+The example uses `ghcr.io/example/phantom:latest` as an unmistakable placeholder.
+Replace it with the image path shown under this project's **Packages** on GitHub.
+The package must be public for an anonymous `docker compose pull`; no PAT is
+needed for a public image. A public source repository does not automatically
+make its container package public.
 
-- **Your laptop** is where you edit the project and push changes to GitHub.
-- **GitHub** stores the source code, runs the automated build, and stores the
-  finished container image in GitHub Container Registry (GHCR).
-- **Your server** downloads that image and runs it as a container. It keeps
-  Phantom's database in a Docker volume on the server.
+The `:latest` tag is a movable label, not an auto-update feature. A running
+container stays on its current image until you explicitly pull and recreate it.
 
-The source code is not the running application. A **container image** is the
-packaged application; a **container** is one running copy of that image. The
-`phantom-data` volume is where the database lives, separately from both. Replacing
-the container does not delete that volume. Never remove the volume unless you
-intend to erase the database.
+## Prepare a published image
 
-There are two ways to update the server:
+### LAPTOP — use a local image instead (x86-64 server only)
 
-1. **Recommended first setup: manual update.** GitHub builds and publishes the
-   image; you tell the server to download and run it with a few commands.
-2. **Optional later: automatic deployment.** A workflow can connect from GitHub
-   to your server using SSH and replace the image for you. It requires extra
-   setup; skip that until the manual path is working.
-
-The image tag `:latest` is a movable label that points to the newest image. It
-does **not** make an already-running container update itself. To install an
-updated image, run `docker compose pull` and then `docker compose up -d --wait`
-on the server.
-
-## Part 1 — Build and publish the image
-
-### LAPTOP — save and push your project changes
-
-Make sure the intended workflow changes are committed and pushed to the
-repository's `main` branch. Stage only the files you intend to publish; do not
-stage secrets or private notes. No Docker build on your laptop or source-code
-checkout on the server is needed for this deployment path.
+If the server reports `x86_64`, build a local image on the laptop and transfer it
+to the server. Docker must be installed on the laptop, and the build must target
+the server architecture. For an x86-64 laptop and server:
 
 ```sh
-git status
-git add PATH_TO_INTENDED_FILES
-git commit -m "Prepare Phantom deployment"
-git push origin main
+docker build --platform linux/amd64 -t phantom:local .
+docker save phantom:local -o phantom-image.tar
+scp phantom-image.tar YOUR_SERVER_LOGIN@YOUR_SERVER_HOST:~/phantom-image.tar
 ```
 
-If your changes are already committed, skip `git add` and `git commit`.
-
-### GITHUB WEBSITE — wait for the workflow
-
-Open your repository on GitHub, choose **Actions**, and open the run for the
-push to `main`. Wait for all checks and the **Publish** steps to show green.
-Within Publish, confirm the image smoke/health check also passed. The workflow
-builds and publishes a commit-specific Linux ARM64 image to GHCR, then promotes
-the convenient `:latest` tag. The optional
-**Deploy** step should show as skipped unless automatic deployment has
-deliberately been enabled.
-
-The repository being public does **not** automatically make its GHCR package
-public. After the first successful publish:
-
-1. Open the account's **Packages** page on GitHub and choose the Phantom image
-package.
-2. Open the package settings and change its visibility to **Public**.
-3. Confirm the change. This is separate from the source-repository visibility.
-
-Public images can be pulled without a password or personal access token (PAT).
-Do not add a PAT to the server just to pull a public image.
-
-## Part 2 — Run the image on the server
-
-### LAPTOP — connect to your existing server account
-
-Run this command on your laptop. It opens a remote shell on the server; replace
-the login and hostname with the values for your server:
+`YOUR_SERVER_LOGIN` and `YOUR_SERVER_HOST` are the SSH login and hostname you
+already use to access the server. On the server, load the transferred image:
 
 ```sh
-ssh YOUR_SERVER_LOGIN@YOUR_SERVER_HOST
+docker load -i ~/phantom-image.tar
 ```
 
-The login is a Linux user on the server. It is not your laptop account or your
-GitHub account. For manual deployment you do not need to create a new
-`deploy-user`, make an SSH key for GitHub, or add GitHub SSH secrets. The server
-account does need permission to use Docker.
+In the Compose `.env` below, set `PHANTOM_IMAGE=phantom:local`. The local image
+is not automatically refreshed by GHCR; rebuild, transfer, and load a new one
+when you want to update it.
 
-After you connect, commands explicitly labeled **SERVER** below are entered at
-the remote shell prompt, not in a separate laptop terminal.
+## First run on server
 
-### SERVER — confirm Docker is ready
+### create the Compose file
 
-Check that the server is ARM64 and has Docker Compose v2:
-
-```sh
-uname -m
-docker --version
-docker compose version
-```
-
-`uname -m` should normally report `aarch64`. Docker Compose should support
-`up --wait`. If Docker is not installed or your account cannot run Docker, ask
-the server administrator to set that up before continuing. Docker access is
-powerful: it is effectively administrator/root-level access on that server.
-
-### SERVER — create a Compose configuration
-
-Create a folder in your account's home directory, then open a new file in a
-terminal editor:
+Create a private working directory and open a new Compose file:
 
 ```sh
 mkdir -p ~/phantom
@@ -117,16 +50,16 @@ cd ~/phantom
 nano compose.yaml
 ```
 
-Paste this complete configuration. Replace `ghcr.io/example/phantom` with the
-GHCR image path shown on your GitHub package page. Replace the example hostname
-with the exact public HTTPS hostname you will configure in Caddy. Set `TZ` to
-your calendar timezone (or leave it as `UTC` if that is what you want).
+Paste the complete configuration below. It reads the image reference from
+`PHANTOM_IMAGE` in `.env` and binds the app to local port 3001 only. The
+platform defaults to ARM64 for the published CI image; the local x86-64 option
+below sets it to AMD64.
 
 ```yaml
 services:
   phantom:
-    image: ghcr.io/example/phantom:latest
-    platform: linux/arm64
+    image: ${PHANTOM_IMAGE:?Set PHANTOM_IMAGE in .env}
+    platform: ${PHANTOM_PLATFORM:-linux/arm64}
     init: true
     restart: unless-stopped
     read_only: true
@@ -140,10 +73,10 @@ services:
       AUTH_USERNAME: ${AUTH_USERNAME:?Set AUTH_USERNAME in .env}
       AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env}
       AUTH_TRUST_PROXY: ${AUTH_TRUST_PROXY:-0}
-      PUBLIC_ORIGIN: https://phantom.example.com
-      TZ: UTC
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3001}
+      TZ: ${TZ:-UTC}
     ports:
-      - "127.0.0.1:3100:3001"
+      - "127.0.0.1:3001:3001"
     volumes:
       - phantom-data:/app/data
     tmpfs:
@@ -159,262 +92,197 @@ volumes:
     name: phantom-data
 ```
 
-In `nano`, save with **Ctrl+O**, press **Enter**, then exit with **Ctrl+X**.
-The stable explicit volume name (`phantom-data`) keeps the database when you
-update or recreate this container. The port is bound to server loopback only;
-visitors reach the app through Caddy, not directly on port 3100. The container
-runs as the non-root user built into the image, with a read-only filesystem and
-restricted capabilities. The image already defines a Docker health check for
-`/api/health`; Compose uses it when `--wait` waits for startup.
+The image runs as its built-in non-root user, has a read-only filesystem, and
+gets a small writable temporary filesystem. The persistent volume is explicitly
+named so its identity does not change if the folder or Compose project name
+changes. The image includes a health check for `/api/health`, which Compose uses
+with `--wait`.
 
-Create the private environment file in the same folder. It provides the required
-login credentials to Compose; use a unique username and a long, randomly
-generated password. These are examples only, not usable credentials:
+### create the private `.env`
+
+Compose reads the `.env` file for substitutions in `compose.yaml`. The
+`env_file` also passes the variables into the application container. Create the
+file beside `compose.yaml`:
 
 ```sh
+cd ~/phantom
 nano .env
 ```
 
-Add these lines, replacing both placeholders with your own values (no spaces
-around `=`):
+Paste this content, replacing the example image with the package path shown in
+GitHub Packages and replacing the username and password with unique values. For
+a local image instead, use `PHANTOM_IMAGE=phantom:local`:
 
 ```dotenv
-AUTH_USERNAME=replace-with-your-username
+AUTH_USERNAME=choose-a-username
 AUTH_PASSWORD=replace-with-a-long-random-password
-AUTH_TRUST_PROXY=1
+AUTH_TRUST_PROXY=0  # set 1 only under a trusted proxy like your caddy
+PUBLIC_ORIGIN=http://localhost:3001
+TZ=UTC
+PHANTOM_IMAGE=ghcr.io/example/phantom:latest
+# For a locally built x86-64 image, replace the image above with phantom:local
+# and add:
+# PHANTOM_PLATFORM=linux/amd64
 ```
 
-Save and exit, then restrict access to the file:
+For an x86-64 local image, set `PHANTOM_IMAGE=phantom:local` and
+`PHANTOM_PLATFORM=linux/amd64` in `.env`. For an ARM64 local image, use
+`PHANTOM_PLATFORM=linux/arm64`. Choose a real timezone instead of `UTC` if you
+want the app's daily dates to follow another timezone. Save and exit, then
+protect the credentials file:
 
 ```sh
 chmod 600 .env
 ```
 
-Keep `.env` private and never commit or share it. If a password contains a `$`,
-put the complete value in single quotes so Compose treats it literally, for
-example `AUTH_PASSWORD='your$password'`. Do not paste credentials in commands,
+Keep `.env` private; do not commit or share it. In Compose `.env` files, a
+password containing `$` should be single-quoted, for example
+`AUTH_PASSWORD='your$password'`. Avoid putting credentials in commands,
 screenshots, or logs.
 
-`AUTH_TRUST_PROXY=1` is appropriate here only because Caddy is the single trusted
-proxy hop and the app port is published on `127.0.0.1` only. It lets the app use
-Caddy's rightmost appended `X-Forwarded-For` address for login throttling. Never
-enable it if clients can reach the app directly or untrusted containers can
-connect to it, because they could forge forwarded client addresses. The default
-is `0`, which is the safe choice for local development or direct access.
+### pull and start Phantom
 
-### SERVER — download, start, and check Phantom
-
-These commands run on the server, in `~/phantom`:
+For the published image, `PHANTOM_IMAGE` in `.env` must contain the real GHCR
+path from GitHub Packages, and the package must permit anonymous pulls. Run:
 
 ```sh
 cd ~/phantom
 docker compose pull
 docker compose up -d --wait
 docker compose ps
-curl --fail http://127.0.0.1:3100/api/health
+curl --fail http://127.0.0.1:3001/api/health
 ```
 
-The health command should return JSON indicating the service is healthy. If
-`pull` says access is denied, first check the image path and make the GHCR
-package public as described above. If `up` fails, inspect the recent container
-logs:
+For a local image, set `PHANTOM_IMAGE=phantom:local` and the matching
+`PHANTOM_PLATFORM` in `.env`, then omit `docker compose pull` and run:
+
+```sh
+cd ~/phantom
+docker compose up -d --wait
+docker compose ps
+curl --fail http://127.0.0.1:3001/api/health
+```
+
+The health request should return a successful response. `127.0.0.1` means the
+port is only accessible from the server itself, ready for an HTTPS reverse proxy
+on that same server. To view it from your laptop without opening the app port,
+create an SSH tunnel in a laptop terminal with
+`ssh -L 3001:127.0.0.1:3001 YOUR_SERVER_LOGIN@YOUR_SERVER_HOST`, then open
+`http://localhost:3001` in a laptop browser. For remote access, set up HTTPS
+below. If pull is denied, confirm the image path and package visibility. For
+startup problems, inspect:
 
 ```sh
 docker compose logs --tail 100 phantom
 ```
 
-## Part 3 — Put Caddy and HTTPS in front
+## Put a reverse proxy in front
 
-Caddy handles public HTTPS. Phantom listens
-only on the server's loopback port, so Caddy on the same server can proxy to
-`127.0.0.1:3100`.
-
-### SERVER — configure a Caddy site
-
-Merge a site like this into the server's **existing** Caddy configuration:
+To reach Phantom remotely, use HTTPS via a reverse proxy such as Caddy, running
+on the same server. Keep the Compose loopback-only port mapping; do not expose
+port 3001 directly to the internet. Configure the proxy for your own hostname,
+and forward requests to `127.0.0.1:3001`. For example, a Caddy site block is:
 
 ```caddyfile
-phantom.example.com {
-    reverse_proxy 127.0.0.1:3100
+your-hostname.example {
+    reverse_proxy 127.0.0.1:3001
 }
 ```
 
-Phantom's application login protects API routes. Caddy basic authentication may
-be retained as an additional layer, but is not needed for app authentication.
-During an upgrade from a Caddy-protected deployment, keep its current Caddy
-authentication in place until the new app is running, browser login succeeds,
-and the app itself rejects requests without an app session. While legacy Caddy
-authentication remains enabled, make the API check with Caddy credentials but
-without an app login cookie, and confirm the response is the app's JSON HTTP 401
-(or check `http://127.0.0.1:3100/api/state` from the server). Only then may you
-remove Caddy basic authentication if you want to rely on the app login alone. If
-retaining Caddy protection, keep the syntax already used by your installed Caddy
-version (`basic_auth` on current releases; `basicauth` on older ones).
-Do not replace the existing Caddy configuration: that could interrupt other
-hosted websites. The same snippet is available at
-`deploy/Caddyfile.example` in the project repository.
+Configure DNS for that hostname to point to the server and allow HTTP/HTTPS
+traffic to the reverse proxy. Preserve any existing proxy configuration and
+protect all application routes. Before applying a change to an existing Caddy
+configuration, make a backup, append the site block rather than replacing the
+file, validate the full configuration, and only then reload Caddy. Exact paths
+and service commands depend on how the proxy was installed.
 
-Before editing, make a dated backup of the current configuration. The following
-commands assume a systemd installation with the file at
-`/etc/caddy/Caddyfile`; verify the actual path and service setup on your server
-first. If you have no existing configuration, create one at the correct path
-instead of making a backup.
+### SERVER — update `.env` for HTTPS
 
-```sh
-sudo cp -a /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)-$$"
-sudo nano /etc/caddy/Caddyfile
+Set `PUBLIC_ORIGIN` to the exact HTTPS origin (scheme and hostname, no path),
+and set `AUTH_TRUST_PROXY=1` only when the app is reachable exclusively through
+one trusted proxy hop. For example:
+
+```dotenv
+PUBLIC_ORIGIN=https://your-hostname.example
+AUTH_TRUST_PROXY=1
 ```
 
-In the editor, go to the end and append the Phantom site block. Do not select,
-erase, or replace the existing file. Save and exit. Then validate the full
-configuration:
+Edit `.env`, preserving your actual username and password. Trust proxy
+is disabled by default and must not be enabled if clients can directly reach the
+app port or an untrusted container can connect to it. It lets the app use the
+trusted proxy's forwarded client address for login throttling.
 
-```sh
-sudo caddy validate --config /etc/caddy/Caddyfile
-```
-
-Only if validation succeeds, reload Caddy:
-
-```sh
-sudo systemctl reload caddy
-```
-
-If validation fails, **do not reload**. Correct the merged configuration first.
-Existing Caddy basic authentication can be kept as an additional layer. The
-`basicauth` directive is compatible with older Caddy installs; use the syntax
-supported by your installed version.
-
-### DNS PROVIDER WEBSITE — configure the hostname's DNS
-
-At the DNS provider for your domain, create an A record for the chosen
-hostname pointing to the server's public IPv4 address. Add an AAAA record only
-if the server is reachable over IPv6. Make sure network/provider firewalls allow
-public HTTP and HTTPS to Caddy (ports 80 and 443). Do not expose port 3100.
-
-### LAPTOP — test the public site
-
-From your laptop, verify that unauthenticated access to the API is rejected with
-HTTP 401 (replace the example hostname):
-
-```sh
-curl -i https://phantom.example.com/api/state
-```
-
-Then open `https://phantom.example.com/` in a browser, sign in using the
-`AUTH_USERNAME` and `AUTH_PASSWORD` from your private `.env`, create a practice,
-and reload the page. Try a prompted journal entry too. Confirm the entry remains
-after a server-side container restart.
-To restart the container, open a second laptop terminal, connect over SSH, then
-run this at the remote server prompt:
+Apply the new origin and proxy settings by recreating the container:
 
 ```sh
 cd ~/phantom
-docker compose restart phantom
+docker compose up -d --wait
 ```
 
-Return to the browser and reload the app to confirm the saved entry remains.
+### BROWSER — verify the HTTPS site
 
-## Updating Phantom later
+Open the HTTPS hostname you configured and sign in using the credentials from
+the server `.env`. An unauthenticated API request should be rejected:
 
-### LAPTOP — push the update
+```sh
+curl -i https://your-hostname.example/api/state
+```
 
-Commit and push your intended changes to `main`, as in Part 1. Stage only files
-meant for the public repository. No Docker build is needed on your laptop.
+The login page is intentionally public. Create a test entry, refresh, and
+confirm it remains. Confirm that private data and API operations require an
+authenticated application session.
 
-### GITHUB WEBSITE — confirm the image is ready
+## Update the application
 
-Open **Actions** and wait for checks, ARM64 image publication, smoke test, and
-the `:latest` promotion to pass. This alone does not change the container
-already running on your server.
+### BROWSER — back up important data
 
-### SERVER — update the running service
+Before a significant update, use Phantom's export/backup feature and keep a copy
+somewhere other than the server.
 
-Before a significant update, export a JSON backup in Phantom using its backup or
-export feature and keep a copy somewhere safe. Do this in the browser before
-typing the server commands below. Then run:
+### SERVER — pull and replace the container
+
+After the image has been published, run:
 
 ```sh
 cd ~/phantom
 docker compose pull
 docker compose up -d --wait
 docker compose ps
-curl --fail http://127.0.0.1:3100/api/health
 ```
 
-Compose replaces the old container while keeping the `phantom-data` volume.
-There is no need to run `docker compose down` first. **Never run
-`docker compose down -v`** for normal updates: `-v` removes the database volume.
+Compose replaces the container while keeping the `phantom-data` volume. There is
+no need to run `docker compose down` first. **Never use `docker compose down -v`
+for a routine update**: `-v` removes the database volume. For a local image,
+rebuild and load the replacement image before running `docker compose up -d
+--wait` (and omit `docker compose pull` if that image is not published).
 
-If the update is unhealthy, inspect logs and the app's backup before taking
-further action:
+If the new container is unhealthy, check its status and logs:
 
 ```sh
-docker compose logs --tail 100 phantom
 docker compose ps
+docker compose logs --tail 100 phantom
 ```
 
-Changing back to an older image does not reverse database migrations. Restore
-from a verified application backup only when needed.
+Returning to an older image does not undo database migrations. Restore from a
+verified application backup only when needed.
 
-## Optional: automatic deployment from GitHub
+## Troubleshooting and safety
 
-Skip this section unless you specifically want GitHub to SSH to the server and
-update it automatically. Manual deployment above does not need a `deploy-user`,
-GitHub SSH key, or deployment secrets.
+- **Pull says denied:** Check the exact package image name and make sure the GHCR
+  package is public. A public source repository alone is not enough.
+- **No matching image platform:** The published CI image is ARM64-only. For
+  `x86_64`, build an `amd64` image locally and set `PHANTOM_IMAGE` as described
+  above.
+- **Container does not start:** Run `docker compose ps` and
+  `docker compose logs --tail 100 phantom`; fix the reported issue before
+  changing the volume or deleting anything.
+- **Browser origin/authentication errors:** Confirm that `PUBLIC_ORIGIN` exactly
+  matches the URL in the browser. For HTTPS, use `https://` and the exact
+  hostname. Trust proxy is only for the single trusted reverse-proxy setup.
+- **Protect the data:** Keep the `phantom-data` volume, protect `.env`, and keep
+  tested backups off-server. Do not run `docker compose down -v` unless you
+  intentionally want to delete the database.
 
-The optional deployment lane is gated by the repository Actions variable
-`AUTO_DEPLOY=true`. When enabled, successful image checks trigger a server
-deployment using the published immutable image digest (or commit-specific tag),
-not the mutable `:latest` tag. It uses the repository's managed `/opt/phantom`
-deployment files, SSH, a verified host key, and a server Linux account permitted
-to run Docker. This is separate from the simple `~/phantom` manual Compose
-setup. Do not enable the variable until the managed-stack setup and migration
-have been deliberately completed.
-
-For automatic deployment, an administrator creates/chooses a dedicated server
-Linux login (often named `deploy-user`) and configures a dedicated SSH key,
-verified host-key entry, and the workflow's required GitHub environment secrets:
-`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_KNOWN_HOSTS` in the
-`production` environment. `DEPLOY_PORT` is an optional repository Actions
-variable (defaults to SSH port 22). Set repository Actions variable
-`AUTO_DEPLOY` to the exact value `true` only after the managed server setup is
-ready. That login is only a server account: it is not a GitHub account and not a
-new laptop account. Docker group membership grants effectively root-level
-access. Protect the private key and workflow write permissions carefully. For
-public GHCR images, no registry PAT is needed on the server.
-
-### Moving from manual `~/phantom` Compose to automatic `/opt/phantom`
-
-Do not just start the managed Compose stack alongside the manual one: both
-would try to use the same host port and data. The managed deploy script also
-expects a recorded immutable image tag/digest in its environment file; a
-standalone `:latest` setup is not a safe starting state for that rollback logic.
-
-Plan a maintenance window. Export and verify an application JSON backup first.
-Record the exact image used by the healthy running container; the managed
-deploy script needs that reference in immutable form (commit-SHA tag or GHCR
-digest), not `:latest`. Prepare the managed files and its `.env` in `/opt/phantom`
-without starting the service yet. Check that its Compose file sets the same
-explicit volume name `phantom-data`, the same public origin, timezone, and port.
-Then stop the `~/phantom` service with `docker compose down` (never add `-v`),
-confirm no Phantom container is still listening on port 3100, and start the
-managed service. Verify
-health and existing entries before enabling `AUTO_DEPLOY=true`.
-
-Do not run the two Compose projects at once, copy a `.env` containing `:latest`
-into the managed deployment and assume it is ready, or run `down -v`. If the
-immutable image state or volume mapping is unclear, leave automation disabled
-and continue manual updates until an administrator has reconciled the managed
-files with the running image. Never delete the volume as part of migration.
-
-## Key safety rules
-
-- Keep database data in `phantom-data`; never remove it during routine updates.
-- Keep Caddy in front of the app, require authentication for every app/API route,
-  and do not expose port 3100 publicly.
-- Keep the required `AUTH_USERNAME` and `AUTH_PASSWORD` in a protected server
-  `.env` file; never put real credentials in Compose files or documentation.
-- Do not put passwords, private keys, or private application data in Git,
-  container images, or public documentation.
-- Backups on the server do not protect against losing the server. Keep a tested
-  backup copy somewhere else.
+Manual Compose deployment does not need an SSH deployment account or GitHub
+deployment secrets. GitHub-to-server automatic deployment, if separately
+configured, is an optional advanced setup and is not needed to follow this guide.

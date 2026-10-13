@@ -1,6 +1,12 @@
 import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { loadEnvFile } from 'node:process';
 import { createApp } from './app.js';
 import { databasePathFromEnvironment } from './database.js';
+
+const envFile = resolve(process.cwd(), '.env');
+if (existsSync(envFile)) loadEnvFile(envFile);
 
 const authUsername = process.env.AUTH_USERNAME;
 const authPassword = process.env.AUTH_PASSWORD;
