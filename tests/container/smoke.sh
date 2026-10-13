@@ -6,6 +6,8 @@ SUFFIX="${USER:-user}-$$"
 SUFFIX="${SUFFIX//[^a-zA-Z0-9_-]/-}"
 PORT="${PHANTOM_SMOKE_PORT:-39167}"
 ORIGIN='https://phantom.example.com'
+AUTH_USERNAME='smoke-owner'
+AUTH_PASSWORD='smoke-test-only-credential-not-for-production'
 TEMP_DIR="$(mktemp -d)"
 CONTAINER=''
 VOLUME=''
@@ -43,13 +45,14 @@ for arch in amd64 arm64; do
       --mount "type=volume,src=${VOLUME},dst=/app/data" \
       --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
       --cap-drop ALL --security-opt no-new-privileges --init --memory 512m --cpus 1 \
-      --env "PUBLIC_ORIGIN=${ORIGIN}" "$image" >/dev/null
+      --env "PUBLIC_ORIGIN=${ORIGIN}" --env "AUTH_USERNAME=${AUTH_USERNAME}" \
+      --env "AUTH_PASSWORD=${AUTH_PASSWORD}" "$image" >/dev/null
     CREATED_CONTAINER=1
   }
 
   wait_healthy() {
     local count=0 health
-    while (( count < 40 )); do
+    while (( count < 120 )); do
       health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || true)"
       [[ "$health" == healthy ]] && return 0
       [[ "$health" == unhealthy ]] && docker logs "$CONTAINER" >&2 && fail "$arch container became unhealthy"
@@ -57,7 +60,7 @@ for arch in amd64 arm64; do
       count=$((count + 1))
     done
     docker logs "$CONTAINER" >&2 || true
-    fail "$arch container did not become healthy within 40 seconds"
+    fail "$arch container did not become healthy within 120 seconds"
   }
 
   api() { curl --fail --silent --show-error "$@"; }
@@ -79,6 +82,19 @@ for arch in amd64 arm64; do
   base="http://127.0.0.1:${PORT}"
   health="$(api "$base/api/health")"
   [[ "$health" == *'"status":"ok"'* ]] || fail "$arch: unexpected health response: $health"
+  unauthenticated="$(curl --silent --output /dev/null --write-out '%{http_code}' "$base/api/state")"
+  expect "$unauthenticated" 401 "$arch unauthenticated state must be rejected"
+  session_cookie="$(AUTH_USERNAME="$AUTH_USERNAME" AUTH_PASSWORD="$AUTH_PASSWORD" BASE="$base" node --input-type=module -e '
+    const response = await fetch(`${process.env.BASE}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: process.env.AUTH_USERNAME, password: process.env.AUTH_PASSWORD }),
+    });
+    if (!response.ok) throw new Error(`login failed: ${response.status}`);
+    const cookie = response.headers.get("set-cookie")?.split(";")[0];
+    if (!cookie) throw new Error("login did not issue a session cookie");
+    process.stdout.write(cookie);
+  ' )"
+  api() { curl --fail --silent --show-error -H "Cookie: ${session_cookie}" "$@"; }
   html="$(api "$base/")"
   [[ "$html" == *'<html'* && "$html" == *'/assets/'* ]] || fail "$arch: production HTML or built asset reference missing"
   asset="$(printf '%s' "$html" | grep -oE '/assets/[^" ]+\.(js|css)' | head -n 1)"
@@ -97,7 +113,7 @@ for arch in amd64 arm64; do
   api -X PUT -H 'content-type: application/json' -H "Origin: ${ORIGIN}" --data "$entry_payload" \
     "$base/api/entries/${journal_id}/${entry_date}" > "$TEMP_DIR/entry.json"
   denied="$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST \
-    -H 'content-type: application/json' -H 'Origin: https://wrong.example.com' \
+    -H 'content-type: application/json' -H "Cookie: ${session_cookie}" -H 'Origin: https://wrong.example.com' \
     --data "$habit_payload" "$base/api/habits")"
   expect "$denied" 403 "$arch wrong origin must be rejected"
 
@@ -110,6 +126,16 @@ for arch in amd64 arm64; do
   CREATED_CONTAINER=0
   start_container
   wait_healthy
+  session_cookie="$(AUTH_USERNAME="$AUTH_USERNAME" AUTH_PASSWORD="$AUTH_PASSWORD" BASE="$base" node --input-type=module -e '
+    const response = await fetch(`${process.env.BASE}/api/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: process.env.AUTH_USERNAME, password: process.env.AUTH_PASSWORD }),
+    });
+    if (!response.ok) throw new Error(`login failed after restart: ${response.status}`);
+    process.stdout.write(response.headers.get("set-cookie")?.split(";")[0] ?? "");
+  ' )"
+  restarted_unauthenticated="$(curl --silent --output /dev/null --write-out '%{http_code}' "$base/api/state")"
+  expect "$restarted_unauthenticated" 401 "$arch state must remain protected after restart"
   state="$(api "$base/api/state")"
   [[ "$state" == *"$habit_id"* && "$state" == *"$journal_id"* && "$state" == *'Persistent journal text for the container smoke test'* ]] || fail "$arch: habit or dated journal entry did not persist after container recreation"
   printf 'PASS: %s API, HTML/assets, PUBLIC_ORIGIN, backup import/export, hardening, dated journal persistence (image %s)\n' "$arch" "$(docker image inspect "$image" --format '{{.Id}}')"

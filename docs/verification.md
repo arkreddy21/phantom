@@ -56,8 +56,8 @@ protection. Re-run affected checks after any corrective edits.
 
 The backend, browser suite, and production smoke were validated by their
 implementation lanes and reconciled by the orchestrator. Sound is synthesized;
-automated browser checks do not establish subjective audio similarity. Firefox,
-Safari, internet deployment, and authentication remain outside this evidence.
+automated browser checks do not establish subjective audio similarity. Firefox
+and Safari remain outside this evidence.
 
 ## Deployment evidence — 2026-10-11
 
@@ -79,19 +79,28 @@ silently discard the old image/configuration.
   configuration and image-state persistence error paths; corrections are covered
   by deployment-script tests.
 
-## Docker evidence — 2026-10-12
+## Authentication and final Docker evidence — 2026-10-12
 
-- Both `linux/amd64` and `linux/arm64` images built from the current tree.
-- `bash tests/container/smoke.sh` passed for both architectures: API health,
-  production HTML/assets, accepted/rejected origins, backup export/import,
-  nonroot/read-only execution, tmpfs, dropped capabilities, CPU/memory limits,
-  and dated journal content surviving container recreation with a named volume.
-- Real ARM64 Compose startup, entry persistence after force-recreation, and
-  `backup.sh` JSON validation and permissions (file `0600`, directory `0700`)
-  passed with isolated test resources. Compose configuration validation passed.
-- Client/server typechecks, 13 API tests, 12 mocked deployment tests, production
-  build, Chromium acceptance, and workflow linting passed.
-- Private build-context directories were excluded and absent from the image.
+- Final `pnpm test`: 26 API integration tests passed, including mandatory owner
+  auth, session/logout/revocation, forwarded-header trust disabled by default,
+  explicit rightmost-hop trust, and legacy database preservation.
+- `pnpm test:e2e`: 8 development-mode Chromium scenarios passed; the production
+  PWA scenario was skipped because the dev server does not register a worker.
+  `E2E_PRODUCTION=1 pnpm test:e2e`: all 9 scenarios passed, including production
+  worker registration, no API caching, and no persisted session tokens.
+- Final `pnpm build` passed. Final `bash tests/container/smoke.sh` rebuilt and
+  passed both `linux/amd64` and `linux/arm64` images from the final frontend and
+  server sources. API login/401 guards, HTML/assets, origins, backup import/export,
+  nonroot/read-only execution, tmpfs, capability drop, resource limits, and
+  persisted dated journal data after container recreation passed on both.
+- Isolated Compose using HTTPS `PUBLIC_ORIGIN` passed login with a Secure cookie,
+  protected `backup.sh` export, backup JSON validation, mode `0600` backup and
+  `0700` backup directory checks, session revocation after backup, anonymous API
+  rejection, and persisted content after service restart. No production host was
+  contacted and test Compose resources were removed.
+- Deployment script tests, shell syntax, actionlint, Compose config validation,
+  and `git diff --check` passed. Container-private files remain excluded by
+  `.dockerignore`.
 
 ARM64 runtime checks used emulation on an x86-64 host, not native ARM hardware.
 No remote SSH connection, GHCR publication, DNS change, or Caddy reload was

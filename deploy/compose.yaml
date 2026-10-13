@@ -5,11 +5,16 @@ services:
     init: true
     restart: unless-stopped
     read_only: true
+    env_file:
+      - .env
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3001"
       DATA_DIR: /app/data
+      AUTH_USERNAME: ${AUTH_USERNAME:?Set AUTH_USERNAME in deploy/.env}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in deploy/.env}
+      AUTH_TRUST_PROXY: ${AUTH_TRUST_PROXY:-0}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://phantom.example.com}
       TZ: ${TZ:-UTC}
     ports:

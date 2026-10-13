@@ -20,7 +20,7 @@ setup() {
   printf '\nmarker: current\n' >> "$TEST_DIR/compose.yaml"
   printf '\nmarker: candidate\n' >> "$TEST_DIR/compose.next.yaml"
   chmod +x "$TEST_DIR/deploy.sh" "$TEST_DIR/backup.sh"
-  printf 'PHANTOM_IMAGE=%s\nPHANTOM_PORT=3100\nPUBLIC_ORIGIN=https://phantom.example.com\n' "$IMAGE_A" > "$TEST_DIR/.env"
+  printf 'PHANTOM_IMAGE=%s\nPHANTOM_PORT=3100\nPUBLIC_ORIGIN=https://phantom.example.com\nAUTH_USERNAME=test-owner\nAUTH_PASSWORD=test-only-password\n' "$IMAGE_A" > "$TEST_DIR/.env"
   : > "$TEST_DIR/docker.log"
   cat > "$TEST_DIR/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
@@ -36,6 +36,10 @@ if [[ "$1" == inspect ]]; then
 fi
 if [[ "$1" == compose ]]; then
   case " $* " in
+    *' exec '* )
+      [[ "${BACKUP_FAIL:-0}" != 1 ]] || exit 1
+      printf '{"version":1,"stats":[],"habits":[],"entries":[]}\n'
+      ;;
     *' ps '*)
       if [[ " $* " == *' --all '* ]]; then
         [[ "${EXISTING_CONTAINER:-1}" == 1 ]] && printf 'phantom-container\n'
@@ -75,6 +79,7 @@ while (( $# )); do
   esac
 done
 if [[ "$last" == */api/backup ]]; then
+  [[ "${AUTH_REQUIRED:-0}" != 1 ]] || exit 22
   printf '{"version":1,"stats":[],"habits":[],"entries":[]}\n' > "$output"
 elif [[ "$last" == */api/health && "${HEALTH_FAIL:-0}" == 1 ]]; then
   exit 22
@@ -104,7 +109,7 @@ MOCK
 export TEST_DIR
 export IMAGE_A
 export PATH="$TEST_DIR/bin:$PATH"
- unset RUNNING EXISTING_CONTAINER PULL_FAIL COMPOSE_UP_FAIL_IMAGE BACKUP_FAIL HEALTH_FAIL CURRENT_HEALTH CURRENT_STATUS CURRENT_IMAGE MV_FAIL_DEST CHMOD_FAIL || true
+  unset RUNNING EXISTING_CONTAINER PULL_FAIL COMPOSE_UP_FAIL_IMAGE BACKUP_FAIL AUTH_REQUIRED HEALTH_FAIL CURRENT_HEALTH CURRENT_STATUS CURRENT_IMAGE MV_FAIL_DEST CHMOD_FAIL || true
 }
 
 run_deploy() {
@@ -140,6 +145,12 @@ grep -F 'content=marker: candidate' "$TEST_DIR/up.log" >/dev/null || fail 'candi
 grep -F 'marker: candidate' "$TEST_DIR/compose.yaml" >/dev/null || fail 'successful deployment should promote candidate Compose config'
 backup_files=("$TEST_DIR"/backups/phantom-*.json)
 (( ${#backup_files[@]} == 1 )) && [[ -s "${backup_files[0]}" ]] || fail 'deploy should retain a JSON backup'
+pass_count=$((pass_count + 1))
+
+setup authenticated_backup
+AUTH_REQUIRED=1 run_deploy "$IMAGE_B" >/dev/null
+grep -F 'docker compose --project-directory' "$TEST_DIR/docker.log" | grep -F ' exec -T phantom node -e ' >/dev/null || fail 'authenticated backup should execute login inside the container'
+if grep -F 'test-only-password' "$TEST_DIR/docker.log" >/dev/null; then fail 'backup credentials must not appear in Docker command arguments or logs'; fi
 pass_count=$((pass_count + 1))
 
 setup pull_failure

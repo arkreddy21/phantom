@@ -5,16 +5,36 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DailyEntry, Habit, Reward, Stat } from '../shared/types.js';
 import { createDatabase, readBackup, readState, restoreBackup } from './database.js';
+import { AuthService, type AuthOptions } from './auth.js';
 import { entryUpdateSchema, habitCreateSchema, habitPatchSchema, isoDate, localDateString, statCreateSchema, statPatchSchema } from './validation.js';
 
-type AppOptions = { database?: DatabaseSync; databasePath?: string; production?: boolean; clientDirectory?: string; publicOrigin?: string };
+type AppOptions = { database?: DatabaseSync; databasePath?: string; production?: boolean; clientDirectory?: string; publicOrigin?: string; auth: AuthOptions; authTrustProxy?: boolean };
 
-export function createApp(options: AppOptions = {}) {
+export function createApp(options: AppOptions) {
   const publicOrigin = options.publicOrigin === undefined ? undefined : normalizePublicOrigin(options.publicOrigin);
+  if (!options.auth) throw new Error('Authentication is required; configure auth.username and auth.password');
+  const ownsDb = !options.database;
   const db = options.database ?? createDatabase(options.databasePath ?? './data/persona.sqlite');
+  let auth: AuthService;
+  try { auth = new AuthService(db, options.auth); }
+  catch (error) { if (ownsDb) db.close(); throw error; }
+  const secureCookie = publicOrigin?.startsWith('https://') ?? false;
   const app = express();
   app.disable('x-powered-by');
+  if (options.authTrustProxy) app.set('trust proxy', 1);
+  let authReady = false;
+  let authFailed = false;
+  const ready = auth.ready.then(() => { authReady = true; }, (error) => { authFailed = true; throw error; });
+  void ready.catch(() => {});
   app.use((req, res, next) => {
+    if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+    if (req.get('sec-fetch-site')?.toLowerCase() === 'cross-site') {
+      return res.status(403).json({ error: 'Cross-site requests are not allowed' });
+    }
+    if (req.path.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) &&
+        !req.is('application/json')) {
+      return res.status(403).json({ error: 'Unsafe API requests must use application/json' });
+    }
     const origin = req.get('origin');
     if (origin) {
       try {
@@ -45,7 +65,37 @@ export function createApp(options: AppOptions = {}) {
     express.json({ limit, strict: true })(req, res, next);
   });
 
-  app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+  app.get('/api/health', (_req, res) => {
+    if (authFailed) return res.status(503).json({ status: 'unavailable' });
+    if (!authReady) return res.status(503).json({ status: 'starting' });
+    res.json({ status: 'ok' });
+  });
+  app.get('/api/auth/session', async (req, res) => res.json({ user: await auth.authenticate(req.get('cookie')) }));
+  app.post('/api/auth/login', async (req, res) => {
+    const address = options.authTrustProxy ? req.ip : req.socket.remoteAddress;
+    const result = await auth.login(req.body?.username, req.body?.password, address || 'unknown', secureCookie);
+    if (result && 'throttled' in result) {
+      res.setHeader('Retry-After', String(result.retryAfter));
+      return res.status(429).json({ error: 'Invalid username or password' });
+    }
+    if (!result) return res.status(401).json({ error: 'Invalid username or password' });
+    res.setHeader('Set-Cookie', result.cookie);
+    res.json({ user: result.user });
+  });
+  app.post('/api/auth/logout', async (req, res) => {
+    await auth.logout(req.get('cookie'));
+    res.setHeader('Set-Cookie', auth.expiredCookie(secureCookie));
+    res.json({ ok: true });
+  });
+
+  app.use('/api', async (req, res, next) => {
+    if ((req.path === '/health' && req.method === 'GET') ||
+        (req.path === '/auth/session' && req.method === 'GET') ||
+        (req.path === '/auth/login' && req.method === 'POST') ||
+        (req.path === '/auth/logout' && req.method === 'POST')) return next();
+    if (!await auth.authenticate(req.get('cookie'))) return res.status(401).json({ error: 'Authentication required' });
+    next();
+  });
   app.get('/api/state', (_req, res) => res.json(readState(db)));
   app.get('/api/backup', (_req, res) => res.json(readBackup(db)));
   app.post('/api/backup', (req, res, next) => {
@@ -175,7 +225,7 @@ export function createApp(options: AppOptions = {}) {
     res.status(500).json({ error: 'Internal server error' });
   };
   app.use(errorHandler);
-  return { app, db };
+  return { app, db, ready };
 }
 
 function normalizePublicOrigin(value: string): string {

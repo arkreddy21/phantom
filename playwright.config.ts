@@ -6,7 +6,10 @@ import { defineConfig, devices } from '@playwright/test';
 const dataDir = `/tmp/opencode/persona-e2e-${randomUUID()}`;
 const vitePort = Number(process.env.E2E_VITE_PORT || 5174);
 const apiPort = Number(process.env.E2E_API_PORT || 3002);
-const command = process.env.E2E_COMMAND || `pnpm exec concurrently -k -n server,client "pnpm exec tsx watch server/index.ts" "pnpm exec vite --host 127.0.0.1 --port ${vitePort} --strictPort"`;
+const production = process.env.E2E_PRODUCTION === '1';
+const command = process.env.E2E_COMMAND || (production
+  ? 'node dist/server/server/index.js --production'
+  : `pnpm exec concurrently -k -n server,client "pnpm exec tsx watch server/index.ts" "pnpm exec vite --host 127.0.0.1 --port ${vitePort} --strictPort"`);
 
 export default defineConfig({
   testDir: './e2e',
@@ -30,8 +33,11 @@ export default defineConfig({
     env: {
       ...process.env,
       DATA_DIR: dataDir,
-      PORT: String(apiPort),
+      AUTH_USERNAME: process.env.AUTH_USERNAME || 'phantom-e2e',
+      AUTH_PASSWORD: process.env.AUTH_PASSWORD || 'phantom-e2e-password',
+      PORT: String(production ? vitePort : apiPort),
       HOST: '127.0.0.1',
+      PUBLIC_ORIGIN: `http://127.0.0.1:${vitePort}`,
     },
   },
 });

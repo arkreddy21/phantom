@@ -12,8 +12,14 @@ project is developed on Node 26) and pnpm.
 
 ```sh
 pnpm install
+export AUTH_USERNAME='your-username'
+export AUTH_PASSWORD='your-long-random-password'
 pnpm dev
 ```
+
+The application login is required. The development server does not load `.env`
+files automatically, so export both variables in your shell before starting it.
+Choose a strong password and do not commit it.
 
 Open the local URL printed by Vite (normally `http://localhost:5173`). The dev
 API runs on port 3001. The database is created automatically in `data/`; it is
@@ -31,10 +37,9 @@ directory and server settings using the variables in `.env.example` (set them in
 your runtime environment). A persistent disk is required; ephemeral deployment
 storage will lose data. This application is **not suitable for a static host**.
 
-**Do not expose this unauthenticated MVP directly to the internet.** It defaults
-to a loopback listener. For remote use, protect the whole application with an
-authenticated reverse proxy/private network until authentication and ownership
-checks are implemented. Origin validation prevents some browser cross-origin
+**Do not expose the server directly to the internet.** Configure the required
+single-owner `AUTH_USERNAME` and `AUTH_PASSWORD`, and use HTTPS through a reverse
+proxy for remote access. Origin validation prevents some browser cross-origin
 writes; it is not a substitute for authentication.
 
 ## Daily use
@@ -57,8 +62,8 @@ rank. Rank progression is intentionally deferred.
 ## Deployment
 
 The deployment example targets an ARM64 Docker host, with GitHub Actions and
-GHCR publishing an image and host-installed Caddy providing HTTPS and temporary
-access protection. See the [deployment guide](docs/deployment.md) for setup,
+GHCR publishing an image and host-installed Caddy providing HTTPS. See the
+[deployment guide](docs/deployment.md) for setup,
 SSH secrets, DNS, persistent storage, and recovery instructions. Replace the
 example hostname, image name, and host settings with values for your deployment.
 

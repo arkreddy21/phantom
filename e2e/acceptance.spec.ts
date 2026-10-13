@@ -1,6 +1,16 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
+const username = process.env.AUTH_USERNAME || 'phantom-e2e';
+const password = process.env.AUTH_PASSWORD || 'phantom-e2e-password';
+
+async function signIn(page: import('@playwright/test').Page) {
+  await page.goto('/');
+  await page.getByLabel('Username').fill(username);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+}
+
 async function readApiState(page: import('@playwright/test').Page) {
   const response = await page.request.get('/api/state');
   expect(response.ok()).toBeTruthy();
@@ -13,7 +23,7 @@ test('fresh history, practice rewards, reflections, custom practice, and mobile 
   const consoleErrors: string[] = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
-  await page.goto('/');
+  await signIn(page);
   await expect(page.getByRole('heading', { name: 'Your practices.' })).toBeVisible();
   await expect(page.getByRole('article')).toHaveCount(5);
   await expect(page.locator('.note-right')).toHaveText('0 OF 5 DONE');

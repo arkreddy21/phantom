@@ -17,6 +17,7 @@ if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); th
   exit 2
 fi
 command -v curl >/dev/null || { printf 'curl is required for backups\n' >&2; exit 2; }
+command -v docker >/dev/null || { printf 'docker is required for authenticated backups\n' >&2; exit 2; }
 command -v python3 >/dev/null || { printf 'python3 is required to validate backups\n' >&2; exit 2; }
 
 umask 077
@@ -27,9 +28,46 @@ temporary="$(mktemp "$backup_dir/.backup.XXXXXX")"
 cleanup() { rm -f -- "$temporary"; }
 trap cleanup EXIT
 
-if ! curl --connect-timeout 5 --max-time 60 --fail --silent --show-error --output "$temporary" "http://127.0.0.1:${port}/api/backup"; then
-  printf 'Could not retrieve application backup; no backup was saved\n' >&2
-  exit 1
+if ! curl --connect-timeout 5 --max-time 60 --fail --silent --output "$temporary" "http://127.0.0.1:${port}/api/backup"; then
+  # New versions require an app session. Log in inside the container so neither
+  # credential nor session token is placed in host process arguments or logs.
+  if ! docker compose --project-directory "$SCRIPT_DIR" --env-file "$ENV_FILE" \
+    -f "$SCRIPT_DIR/compose.yaml" exec -T phantom node -e '
+      (async () => {
+        const base = "http://127.0.0.1:3001";
+        const request = (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(30000) });
+        let cookie;
+        try {
+          const login = await request(`${base}/api/auth/login`, {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ username: process.env.AUTH_USERNAME, password: process.env.AUTH_PASSWORD }),
+          });
+          if (!login.ok) throw new Error("application login failed");
+          cookie = login.headers.get("set-cookie")?.split(";")[0];
+          if (!cookie) throw new Error("application session was not issued");
+          const backup = await request(`${base}/api/backup`, { headers: { cookie } });
+          if (!backup.ok) throw new Error("application backup request failed");
+          const contents = await backup.text();
+          if (!contents.trim()) throw new Error("application backup was empty");
+          process.stdout.write(contents);
+          process.exitCode = 0;
+          process.stdout.on("error", () => {});
+        } finally {
+          if (cookie) {
+            try {
+              const logout = await request(`${base}/api/auth/logout`, {
+                method: "POST", headers: { cookie, "content-type": "application/json" }, body: "{}",
+              });
+              if (!logout.ok) console.error("Could not revoke temporary backup session");
+            }
+            catch { console.error("Could not revoke temporary backup session"); }
+          }
+        }
+      })().catch(() => { console.error("Could not retrieve authenticated application backup"); process.exit(1); });
+    ' > "$temporary"; then
+    printf 'Could not retrieve application backup; no backup was saved\n' >&2
+    exit 1
+  fi
 fi
 if ! python3 - "$temporary" <<'PY'
 import json

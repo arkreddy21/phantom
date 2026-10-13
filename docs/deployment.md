@@ -1,7 +1,8 @@
 # Deploy Phantom: beginner's guide
 
 This guide deploys Phantom to an ARM64 Linux server and puts Caddy in front of
-it for HTTPS and password protection. The examples use `phantom.example.com`,
+it for HTTPS. Phantom requires its own single-owner username and password. The
+examples use `phantom.example.com`,
 `ghcr.io/example/phantom`, and a `~/phantom` folder. Replace these placeholders
 with your own values.
 
@@ -129,11 +130,16 @@ services:
     init: true
     restart: unless-stopped
     read_only: true
+    env_file:
+      - .env
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3001"
       DATA_DIR: /app/data
+      AUTH_USERNAME: ${AUTH_USERNAME:?Set AUTH_USERNAME in .env}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in .env}
+      AUTH_TRUST_PROXY: ${AUTH_TRUST_PROXY:-0}
       PUBLIC_ORIGIN: https://phantom.example.com
       TZ: UTC
     ports:
@@ -161,6 +167,41 @@ runs as the non-root user built into the image, with a read-only filesystem and
 restricted capabilities. The image already defines a Docker health check for
 `/api/health`; Compose uses it when `--wait` waits for startup.
 
+Create the private environment file in the same folder. It provides the required
+login credentials to Compose; use a unique username and a long, randomly
+generated password. These are examples only, not usable credentials:
+
+```sh
+nano .env
+```
+
+Add these lines, replacing both placeholders with your own values (no spaces
+around `=`):
+
+```dotenv
+AUTH_USERNAME=replace-with-your-username
+AUTH_PASSWORD=replace-with-a-long-random-password
+AUTH_TRUST_PROXY=1
+```
+
+Save and exit, then restrict access to the file:
+
+```sh
+chmod 600 .env
+```
+
+Keep `.env` private and never commit or share it. If a password contains a `$`,
+put the complete value in single quotes so Compose treats it literally, for
+example `AUTH_PASSWORD='your$password'`. Do not paste credentials in commands,
+screenshots, or logs.
+
+`AUTH_TRUST_PROXY=1` is appropriate here only because Caddy is the single trusted
+proxy hop and the app port is published on `127.0.0.1` only. It lets the app use
+Caddy's rightmost appended `X-Forwarded-For` address for login throttling. Never
+enable it if clients can reach the app directly or untrusted containers can
+connect to it, because they could forge forwarded client addresses. The default
+is `0`, which is the safe choice for local development or direct access.
+
 ### SERVER — download, start, and check Phantom
 
 These commands run on the server, in `~/phantom`:
@@ -184,36 +225,33 @@ docker compose logs --tail 100 phantom
 
 ## Part 3 — Put Caddy and HTTPS in front
 
-Caddy handles public HTTPS and temporary password protection. Phantom listens
+Caddy handles public HTTPS. Phantom listens
 only on the server's loopback port, so Caddy on the same server can proxy to
 `127.0.0.1:3100`.
 
-### SERVER — add a protected Caddy site
+### SERVER — configure a Caddy site
 
-Make an account-specific bcrypt password hash without putting the plaintext
-password in a command or file:
-
-```sh
-caddy hash-password
-```
-
-Merge a site like this into the server's **existing** Caddy configuration. Use
-your hostname, a username of your choice, and the hash printed by
-`caddy hash-password`:
+Merge a site like this into the server's **existing** Caddy configuration:
 
 ```caddyfile
 phantom.example.com {
-    basic_auth {
-        YOUR_USERNAME YOUR_BCRYPT_HASH
-    }
     reverse_proxy 127.0.0.1:3100
 }
 ```
 
-Basic authentication must protect the entire hostname, including API routes.
+Phantom's application login protects API routes. Caddy basic authentication may
+be retained as an additional layer, but is not needed for app authentication.
+During an upgrade from a Caddy-protected deployment, keep its current Caddy
+authentication in place until the new app is running, browser login succeeds,
+and the app itself rejects requests without an app session. While legacy Caddy
+authentication remains enabled, make the API check with Caddy credentials but
+without an app login cookie, and confirm the response is the app's JSON HTTP 401
+(or check `http://127.0.0.1:3100/api/state` from the server). Only then may you
+remove Caddy basic authentication if you want to rely on the app login alone. If
+retaining Caddy protection, keep the syntax already used by your installed Caddy
+version (`basic_auth` on current releases; `basicauth` on older ones).
 Do not replace the existing Caddy configuration: that could interrupt other
-hosted websites. Keep the plaintext password and resulting hash out of GitHub
-and public source. The same snippet is available at
+hosted websites. The same snippet is available at
 `deploy/Caddyfile.example` in the project repository.
 
 Before editing, make a dated backup of the current configuration. The following
@@ -242,8 +280,9 @@ sudo systemctl reload caddy
 ```
 
 If validation fails, **do not reload**. Correct the merged configuration first.
-The example uses Caddy 2.8+ `basic_auth`; older releases used the `basicauth`
-directive.
+Existing Caddy basic authentication can be kept as an additional layer. The
+`basicauth` directive is compatible with older Caddy installs; use the syntax
+supported by your installed version.
 
 ### DNS PROVIDER WEBSITE — configure the hostname's DNS
 
@@ -254,17 +293,17 @@ public HTTP and HTTPS to Caddy (ports 80 and 443). Do not expose port 3100.
 
 ### LAPTOP — test the public site
 
-From your laptop, check that unauthenticated requests are challenged with HTTP
-401 (replace the example hostname):
+From your laptop, verify that unauthenticated access to the API is rejected with
+HTTP 401 (replace the example hostname):
 
 ```sh
-curl -I https://phantom.example.com/
-curl -I https://phantom.example.com/api/state
+curl -i https://phantom.example.com/api/state
 ```
 
-Then open `https://phantom.example.com/` in a browser, enter the Caddy username
-and password, create a practice, and reload the page. Try a prompted journal
-entry too. Confirm the entry remains after a server-side container restart.
+Then open `https://phantom.example.com/` in a browser, sign in using the
+`AUTH_USERNAME` and `AUTH_PASSWORD` from your private `.env`, create a practice,
+and reload the page. Try a prompted journal entry too. Confirm the entry remains
+after a server-side container restart.
 To restart the container, open a second laptop terminal, connect over SSH, then
 run this at the remote server prompt:
 
@@ -373,6 +412,8 @@ files with the running image. Never delete the volume as part of migration.
 - Keep database data in `phantom-data`; never remove it during routine updates.
 - Keep Caddy in front of the app, require authentication for every app/API route,
   and do not expose port 3100 publicly.
+- Keep the required `AUTH_USERNAME` and `AUTH_PASSWORD` in a protected server
+  `.env` file; never put real credentials in Compose files or documentation.
 - Do not put passwords, private keys, or private application data in Git,
   container images, or public documentation.
 - Backups on the server do not protect against losing the server. Keep a tested

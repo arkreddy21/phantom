@@ -1,8 +1,5 @@
-# Replace USER and HASH_PLACEHOLDER with credentials created using `caddy hash-password`.
-# Do not commit real usernames or password hashes.
+# Phantom has its own required application login. Keep Caddy basic_auth as an
+# additional layer if desired; it is not required for app authentication.
 phantom.example.com {
-	basic_auth {
-		USER HASH_PLACEHOLDER
-	}
 	reverse_proxy 127.0.0.1:3100
 }

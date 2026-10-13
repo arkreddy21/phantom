@@ -128,7 +128,8 @@ jobs:
             --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m
             --cap-drop ALL --security-opt no-new-privileges --init
             --memory 512m --cpus 1
-            --env PUBLIC_ORIGIN=https://phantom.example.com --env TZ=UTC)
+            --env PUBLIC_ORIGIN=https://phantom.example.com --env TZ=UTC
+            --env AUTH_USERNAME=ci-owner --env AUTH_PASSWORD=ci-smoke-test-credential-only)
           cleanup() {
             status=$?
             if (( status != 0 )); then docker logs "$container" >&2 || true; fi
@@ -149,16 +150,26 @@ jobs:
           curl --fail --silent "http://127.0.0.1:${port}/" | grep -qi '<!doctype html'
           date="$(date +%F)"
           PORT="$port" DATE="$date" node --input-type=module -e '
+            const base = `http://127.0.0.1:${process.env.PORT}`;
+            const denied = await fetch(`${base}/api/state`);
+            if (denied.status !== 401) throw new Error(`anonymous state request was not denied: ${denied.status}`);
+            const login = await fetch(`${base}/api/auth/login`, {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ username: "ci-owner", password: "ci-smoke-test-credential-only" }),
+            });
+            if (!login.ok) throw new Error(`login failed: ${login.status}`);
+            const cookie = login.headers.get("set-cookie")?.split(";")[0];
+            if (!cookie) throw new Error("login did not issue a session cookie");
             const date = process.env.DATE;
-            const response = await fetch(`http://127.0.0.1:${process.env.PORT}/api/entries/read-20-minutes/${date}`, {
-              method: "PUT", headers: { "content-type": "application/json", origin: "https://phantom.example.com" },
+            const response = await fetch(`${base}/api/entries/read-20-minutes/${date}`, {
+              method: "PUT", headers: { "content-type": "application/json", origin: "https://phantom.example.com", cookie },
               body: JSON.stringify({ completed: true }),
             });
             if (!response.ok) throw new Error(`entry save failed: ${response.status}`);
-            const denied = await fetch(`http://127.0.0.1:${process.env.PORT}/api/state`, {
-              headers: { origin: "https://rogue.example" },
+            const rogue = await fetch(`${base}/api/state`, {
+              headers: { origin: "https://rogue.example", cookie },
             });
-            if (denied.status !== 403) throw new Error(`rogue Origin was not denied: ${denied.status}`);
+            if (rogue.status !== 403) throw new Error(`rogue Origin was not denied: ${rogue.status}`);
           '
           docker rm --force "$container" >/dev/null
           docker run "${run_args[@]}" "$image" >/dev/null
@@ -170,7 +181,14 @@ jobs:
           done
           [[ "$ready" == 1 ]]
           PORT="$port" DATE="$date" node --input-type=module -e '
-            const response = await fetch(`http://127.0.0.1:${process.env.PORT}/api/state`);
+            const base = `http://127.0.0.1:${process.env.PORT}`;
+            const login = await fetch(`${base}/api/auth/login`, {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ username: "ci-owner", password: "ci-smoke-test-credential-only" }),
+            });
+            if (!login.ok) throw new Error(`login after recreation failed: ${login.status}`);
+            const cookie = login.headers.get("set-cookie")?.split(";")[0];
+            const response = await fetch(`${base}/api/state`, { headers: { cookie } });
             const state = await response.json();
             if (!state.entries.some(entry => entry.habitId === "read-20-minutes" && entry.date === process.env.DATE && entry.completed)) {
               throw new Error("saved entry did not survive container recreation");

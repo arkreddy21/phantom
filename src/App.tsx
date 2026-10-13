@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { Activity, Archive, ArrowDown, ArrowRight, BookOpen, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Download, Edit3, FileText, LoaderCircle, LockKeyhole, Menu, Moon, MoreHorizontal, Plus, Settings2, ShieldCheck, Sparkles, Volume2, VolumeX, X } from 'lucide-react';
 import type { AppState, DailyEntry, Habit, Reward, Stat } from '../shared/types';
-import { api } from './api';
+import { api, authEpoch, bumpAuthEpoch } from './api';
 import { localDate, monthDays, monthKey, monthTitle, prettyDate, shiftDate } from './dates';
 
 type View = 'today' | 'archive' | 'stats';
@@ -73,6 +73,194 @@ function StatMark({ stat, size = 'normal' }: { stat: Stat; size?: 'normal' | 'la
 }
 
 function App() {
+  const [user, setUser] = useState<{ id: string; username: string } | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [sessionError, setSessionError] = useState('');
+  const [gateVersion, setGateVersion] = useState(0);
+  const [logoutState, setLogoutState] = useState<'pending' | 'failed' | null>(null);
+  const [logoutError, setLogoutError] = useState('');
+  const gated = useRef(false);
+  const checkSequence = useRef(0);
+  const logoutLocked = useRef(false);
+  const userRef = useRef(user);
+  userRef.current = user;
+  const refreshSession = useCallback(async (reason: 'initial' | 'return' | 'other-tab' = 'return') => {
+    if (logoutLocked.current) return;
+    const sequence = ++checkSequence.current;
+    const shouldGateDuringCheck = reason !== 'return' || !userRef.current;
+    if (reason === 'other-tab') {
+      gated.current = true;
+      setUser(null);
+    }
+    if (shouldGateDuringCheck) setChecking(true);
+    setSessionError(reason === 'other-tab' ? 'A sign-in change happened in another tab. Checking your session…' : shouldGateDuringCheck ? 'Checking your sign-in…' : '');
+    try {
+      const result = await api.session();
+      if (sequence !== checkSequence.current) return;
+      gated.current = !result.user;
+      if (!result.user) setUser(null);
+      else setUser(current => current?.id === result.user?.id ? current : result.user);
+      setSessionError(result.user ? '' : reason === 'other-tab' ? 'You’re signed out in another tab.' : 'Your session has ended. Sign in again to continue.');
+    } catch {
+      if (sequence !== checkSequence.current) return;
+      gated.current = true;
+      setUser(null);
+      setSessionError('We couldn’t verify your sign-in. Your private data is hidden until we can check again.');
+    } finally {
+      if (sequence === checkSequence.current && shouldGateDuringCheck) setChecking(false);
+    }
+  }, []);
+  useEffect(() => {
+    const unauthorized = (event: Event) => {
+      if (logoutLocked.current) return;
+      const eventEpoch = (event as CustomEvent<{ epoch?: number }>).detail?.epoch;
+      if (eventEpoch !== undefined && eventEpoch !== authEpoch()) return;
+      gated.current = true;
+      checkSequence.current++;
+      setUser(null);
+      setChecking(false);
+      setSessionError('Your session has ended. Sign in again to continue.');
+    };
+    window.addEventListener('phantom:unauthorized', unauthorized);
+    return () => window.removeEventListener('phantom:unauthorized', unauthorized);
+  }, []);
+  useEffect(() => {
+    void refreshSession('initial');
+  }, [gateVersion, refreshSession]);
+  useEffect(() => {
+    const handleReturn = () => { if (document.visibilityState === 'visible') void refreshSession('return'); };
+    const handlePageShow = () => void refreshSession('return');
+    const handleOnline = () => void refreshSession('return');
+    const handleOffline = () => {
+      checkSequence.current++;
+      gated.current = true;
+      setUser(null);
+      setChecking(false);
+      setSessionError('You’re offline. Connect to the internet to check your sign-in and open your private data.');
+    };
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleReturn);
+    return () => {
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleReturn);
+    };
+  }, [refreshSession]);
+  const signalOtherTabs = () => {
+    if ('BroadcastChannel' in window) {
+      const channel = new BroadcastChannel('phantom-auth');
+      channel.postMessage({ type: 'signed-out' });
+      channel.close();
+      return;
+    }
+    try { localStorage.setItem('phantom-auth-change', `${Date.now()}-${Math.random()}`); } catch { /* Other tabs will validate again when they return. */ }
+  };
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'signed-out') void refreshSession('other-tab');
+    };
+    const channel = 'BroadcastChannel' in window ? new BroadcastChannel('phantom-auth') : null;
+    channel?.addEventListener('message', onMessage);
+    const onStorage = (event: StorageEvent) => {
+      if (!channel && event.key === 'phantom-auth-change') void refreshSession('other-tab');
+    };
+    window.addEventListener('storage', onStorage);
+    return () => { channel?.removeEventListener('message', onMessage); channel?.close(); window.removeEventListener('storage', onStorage); };
+  }, [refreshSession]);
+  const signOut = useCallback(async () => {
+    if (logoutLocked.current) return;
+    logoutLocked.current = true;
+    bumpAuthEpoch();
+    gated.current = true;
+    checkSequence.current++;
+    setUser(null);
+    setChecking(false);
+    setLogoutState('pending');
+    setLogoutError('');
+    setSessionError('Signing out…');
+    try {
+      await api.logout();
+      logoutLocked.current = false;
+      setLogoutState(null);
+      setSessionError('You’re signed out.');
+      signalOtherTabs();
+    } catch {
+      setLogoutState('failed');
+      setLogoutError('Could not confirm sign out. Reconnect and try again; sign-in stays locked until logout is confirmed.');
+      setSessionError('');
+    }
+  }, []);
+  if (checking) return <AuthLoading/>;
+  if (!user) return <LoginScreen message={sessionError || logoutError} logoutState={logoutState} onRetryLogout={() => { logoutLocked.current = false; void signOut(); }} onAuthenticated={nextUser => { if (logoutLocked.current || logoutState) return; gated.current = false; setUser(nextUser); setSessionError(''); }} onRetry={() => setGateVersion(value => value + 1)}/>;
+  return <PrivateApp key={user.id} username={user.username} onLogout={signOut}/>;
+}
+
+function AuthLoading() {
+  return <main className="auth-screen"><div className="auth-paper"><div className="auth-brand"><span className="brand-mark">P</span><span>PHANTOM<span className="brand-period">.</span></span></div><span className="loading-spinner"><LoaderCircle/></span><p>Checking your sign-in…</p></div></main>;
+}
+
+function LoginScreen({ message, logoutState, onAuthenticated, onRetry, onRetryLogout }: { message: string; logoutState: 'pending' | 'failed' | null; onAuthenticated: (user: { id: string; username: string }) => void; onRetry: () => void; onRetryLogout: () => void }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(false);
+  const usernameAllowed = username.length > 0 && username.length <= 128 && username.trim() === username;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (pending || logoutState) return;
+    if (!usernameAllowed) { setError('Use a username of 1–128 characters with no spaces at the beginning or end.'); return; }
+    setError(''); setPending(true);
+    try { const result = await api.login(username, password); setPassword(''); onAuthenticated(result.user); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not sign in. Please try again.'); }
+    finally { setPending(false); }
+  };
+  return <main className="auth-screen"><div className="auth-grit" aria-hidden="true"/><section className="auth-panel" aria-labelledby="login-title">
+    <header className="auth-header"><a className="auth-brand" href="/" aria-label="Phantom"><span className="brand-mark">P</span><span>PHANTOM<span className="brand-period">.</span></span></a><span className="auth-edition">YOUR PRIVATE SPACE / 01</span></header>
+    <div className="auth-main"><div className="auth-art" aria-hidden="true"><span className="auth-art-number">01</span><span className="auth-art-slash">///</span><span className="auth-art-word">OWN<br/>YOUR<br/><em>DAY.</em></span><span className="auth-art-caption">YOUR LIFE.<br/>YOUR PACE.</span><i className="auth-art-star">✳</i></div>
+      <div className="auth-form-wrap"><p className="eyebrow"><span className="red-slash">///</span> A PLACE THAT’S YOURS</p><h1 id="login-title">Welcome<br/><em>back.</em></h1><p className="auth-intro">Sign in to pick up where you left off.</p>
+        <form className="auth-form" onSubmit={submit}>
+          <label className="field-label" htmlFor="auth-username">Username<input id="auth-username" name="username" type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={128} value={username} onChange={event => setUsername(event.target.value)} disabled={pending || !!logoutState}/></label>
+          {username.length > 0 && !usernameAllowed && <p className="form-error" role="alert">Use 1–128 characters with no spaces at the beginning or end.</p>}
+          <label className="field-label" htmlFor="auth-password">Password<input id="auth-password" name="password" type="password" autoComplete="current-password" required value={password} onChange={event => setPassword(event.target.value)} disabled={pending || !!logoutState}/></label>
+          {(error || message) && <p className={error ? 'form-error' : 'auth-message'} role={error ? 'alert' : 'status'}>{error || message}</p>}
+          {logoutState === 'failed' && <button type="button" className="button button-red auth-submit" onClick={onRetryLogout}>Retry sign out</button>}
+          {!logoutState && !error && (message.includes('couldn’t') || message.includes('verify') || message.includes('offline') || message.includes('Connect')) && <button type="button" className="auth-retry" onClick={onRetry}>Check again</button>}
+          {logoutState !== 'failed' && <button className="button button-red auth-submit" type="submit" disabled={pending || !!logoutState || !usernameAllowed || !password}>{logoutState === 'pending' || pending ? <><LoaderCircle className="spin" size={17}/> {logoutState ? 'Signing out…' : 'Signing in…'}</> : <>Sign in <ArrowRight size={17}/></>}</button>}
+        </form>
+        <InstallHelp/>
+        <p className="auth-private"><LockKeyhole size={14}/> Your account is private. Your practices stay yours.</p>
+      </div>
+    </div>
+    <footer className="auth-footer"><span>NO SCORE. NO STREAKS. JUST YOU.</span><span>PHANTOM © 2026</span></footer>
+  </section></main>;
+}
+
+function InstallHelp() {
+  const [installer, setInstaller] = useState<Event | null>(null);
+  const [showIos, setShowIos] = useState(false);
+  const [isIos, setIsIos] = useState(false);
+  useEffect(() => {
+    const capture = (event: Event) => { event.preventDefault(); setInstaller(event); };
+    window.addEventListener('beforeinstallprompt', capture);
+    setIsIos(/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+    return () => window.removeEventListener('beforeinstallprompt', capture);
+  }, []);
+  async function install() {
+    if (!installer) return;
+    const prompt = installer as Event & { prompt: () => Promise<void>; userChoice?: Promise<{ outcome: string }> };
+    await prompt.prompt();
+    setInstaller(null);
+  }
+  if (!installer && !isIos) return null;
+  return <div className="install-help">{installer ? <button type="button" onClick={() => void install()}>＋ Add Phantom to your home screen</button> : <button type="button" onClick={() => setShowIos(value => !value)} aria-expanded={showIos}>Use Phantom like an app <span>{showIos ? '−' : '+'}</span></button>}
+    {showIos && !installer && <p>Tap <b>Share</b> in Safari, then choose <b>Add to Home Screen</b>.</p>}
+  </div>;
+}
+
+function PrivateApp({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [data, setData] = useState<AppState>(blankState);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -196,7 +384,7 @@ function App() {
 
     {dialog === 'habit' && <HabitDialog habit={editingHabit} stats={data.stats} onClose={() => { setDialog(null); setEditingHabit(null); }} onSaved={async () => { setDialog(null); setEditingHabit(null); await load(); }} />}
     {dialog === 'stat' && <StatDialog stat={editingStat} onClose={() => { setDialog(null); setEditingStat(null); }} onSaved={async () => { setDialog(null); setEditingStat(null); await load(); }} />}
-    {dialog === 'settings' && <SettingsDialog sound={sound} onSound={setSoundPref} reducedMotion={reducedMotion} onMotion={setMotionPref} onClose={() => setDialog(null)} />}
+    {dialog === 'settings' && <SettingsDialog username={username} onLogout={onLogout} sound={sound} onSound={setSoundPref} reducedMotion={reducedMotion} onMotion={setMotionPref} onClose={() => setDialog(null)} />}
     {activeEntry && !reward && <EntryDialog habit={activeEntry.habit} date={activeEntry.date} entry={entriesByKey.get(`${activeEntry.habit.id}:${activeEntry.date}`)} busy={!!busy} error={entryError} onClearError={() => setEntryError('')} onClose={() => { setActiveEntry(null); setEntryError(''); }} onSave={(body) => submitEntry(activeEntry.habit, activeEntry.date, body)} />}
     {reward && <RewardOverlay reward={reward} onClose={() => { const statId = reward.statId; setReward(null); window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`.complete-control[data-stat-id="${CSS.escape(statId)}"]`)?.focus()); }} />}
   </div>;
@@ -327,22 +515,22 @@ function StatDialog({ stat, onClose, onSaved }: { stat: Stat | null; onClose: ()
   return <Dialog title={stat ? 'Name what matters.' : 'What are you growing?'} eyebrow={stat ? 'EDIT STAT' : 'YOUR OWN MEASURE'} onClose={onClose} className="form-dialog"><form onSubmit={submit}><label className="field-label">Stat name<input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Creativity" maxLength={40}/></label><label className="field-label">A color of its own<div className="color-picker-row"><input type="color" value={color} onChange={e => setColor(e.target.value)} aria-label="Choose stat color"/><span className="color-preview" style={{ backgroundColor: color }}/><code>{color.toUpperCase()}</code><span className="color-note">For this stat’s star and points.</span></div></label>{error && <p className="form-error" role="alert">{error}</p>}<div className="dialog-actions"><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button type="submit" className="button button-red" disabled={pending}>{pending ? <LoaderCircle className="spin" size={16}/> : <Check size={16}/>} {stat ? 'Save stat' : 'Add stat'}</button></div></form></Dialog>;
 }
 
-function SettingsDialog({ sound, onSound, reducedMotion, onMotion, onClose }: { sound: boolean; onSound: (value: boolean) => void; reducedMotion: boolean; onMotion: (value: boolean) => void; onClose: () => void }) {
+function SettingsDialog({ username, onLogout, sound, onSound, reducedMotion, onMotion, onClose }: { username: string; onLogout: () => void; sound: boolean; onSound: (value: boolean) => void; reducedMotion: boolean; onMotion: (value: boolean) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false); const [message, setMessage] = useState(''); const [restoreFile, setRestoreFile] = useState<File | null>(null); const [confirmRestore, setConfirmRestore] = useState(false); const fileRef = useRef<HTMLInputElement>(null);
   async function exportData() {
     setBusy(true); setMessage('');
-    try { const response = await fetch('/api/backup'); if (!response.ok) { let m = 'Could not download your backup.'; try { m = (await response.json()).error || m; } catch {} throw new Error(m); } const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `phantom-backup-${localDate()}.json`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1500); setMessage('Your backup is ready.'); }
+    try { const response = await api.backup('GET'); if (!response.ok) { let m = 'Could not download your backup.'; try { m = (await response.json()).error || m; } catch {} throw new Error(m); } const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `phantom-backup-${localDate()}.json`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1500); setMessage('Your backup is ready.'); }
     catch (e) { setMessage(e instanceof Error ? e.message : 'Could not download your backup.'); }
     finally { setBusy(false); }
   }
   async function importData() {
     if (!restoreFile) return;
     setBusy(true); setMessage('');
-    try { const parsed = JSON.parse(await restoreFile.text()); const response = await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }); if (!response.ok) { let m = 'Could not restore this backup.'; try { m = (await response.json()).error || m; } catch {} throw new Error(m); } setMessage('Backup restored. Reloading…'); window.location.reload(); }
+    try { const parsed = JSON.parse(await restoreFile.text()); const response = await api.backup('POST', parsed); if (!response.ok) { let m = 'Could not restore this backup.'; try { m = (await response.json()).error || m; } catch {} throw new Error(m); } setMessage('Backup restored. Reloading…'); window.location.reload(); }
     catch (e) { setMessage(e instanceof Error ? e.message : 'That file could not be read as a backup.'); }
     finally { setBusy(false); }
   }
-  return <Dialog title="Your data, your call." eyebrow="SETTINGS" onClose={onClose} className="settings-dialog"><div className="setting-row"><div className="setting-icon"><Volume2 size={18}/></div><div className="setting-copy"><b>Reward sound</b><span>A few original notes when you complete a practice.</span></div><button className={`toggle ${sound ? 'on' : ''}`} role="switch" aria-checked={sound} aria-label="Reward sound" onClick={() => onSound(!sound)}><i/></button></div><div className="setting-divider"/><div className="setting-row"><div className="setting-icon"><Activity size={18}/></div><div className="setting-copy"><b>Reduce motion</b><span>{reducedMotion ? 'Gentler movement is on.' : 'Use the full celebratory movement.'}</span></div><button className={`toggle ${reducedMotion ? 'on' : ''}`} role="switch" aria-checked={reducedMotion} aria-label="Reduce motion" onClick={() => onMotion(!reducedMotion)}><i/></button></div><div className="setting-divider"/><div className="setting-row backup-row"><div className="setting-icon"><Download size={18}/></div><div className="setting-copy"><b>Keep a copy</b><span>Export your practices, entries, and stats as a JSON file.</span></div><button className="button button-outline compact" disabled={busy} onClick={() => void exportData()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Download size={14}/>} Export</button></div><div className="restore-block"><div className="restore-copy"><b>Restore from backup</b><span>This replaces the data currently in Phantom.</span></div><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={e => { setRestoreFile(e.target.files?.[0] || null); setConfirmRestore(false); setMessage(''); }}/><button className="button button-quiet compact" disabled={busy} onClick={() => fileRef.current?.click()}><ArrowDown size={14}/> Choose file</button>{restoreFile && <div className="restore-file"><FileText size={14}/><span>{restoreFile.name}</span>{!confirmRestore ? <button className="text-button" onClick={() => setConfirmRestore(true)}>Continue</button> : <button className="text-button danger-text" disabled={busy} onClick={() => void importData()}>{busy ? 'Restoring…' : 'Replace my data'}</button>}</div>}</div>{message && <p className={`setting-message ${message.toLowerCase().includes('could not') ? 'form-error' : ''}`} role="status">{message}</p>}<div className="privacy-note"><LockKeyhole size={15}/><span>Your entries stay on this device. Backup files are yours to keep.</span></div><div className="dialog-actions"><button className="button button-quiet" onClick={onClose}>Done</button></div></Dialog>;
+  return <Dialog title="Your data, your call." eyebrow="SETTINGS" onClose={onClose} className="settings-dialog"><div className="account-row"><div className="setting-icon"><LockKeyhole size={18}/></div><div className="setting-copy"><b>Signed in as {username}</b><span>Your private space, on this device.</span></div><button className="button button-quiet compact" disabled={busy} onClick={onLogout}>Sign out</button></div><InstallHelp/><div className="setting-divider"/><div className="setting-row"><div className="setting-icon"><Volume2 size={18}/></div><div className="setting-copy"><b>Reward sound</b><span>A few original notes when you complete a practice.</span></div><button className={`toggle ${sound ? 'on' : ''}`} role="switch" aria-checked={sound} aria-label="Reward sound" onClick={() => onSound(!sound)}><i/></button></div><div className="setting-divider"/><div className="setting-row"><div className="setting-icon"><Activity size={18}/></div><div className="setting-copy"><b>Reduce motion</b><span>{reducedMotion ? 'Gentler movement is on.' : 'Use the full celebratory movement.'}</span></div><button className={`toggle ${reducedMotion ? 'on' : ''}`} role="switch" aria-checked={reducedMotion} aria-label="Reduce motion" onClick={() => onMotion(!reducedMotion)}><i/></button></div><div className="setting-divider"/><div className="setting-row backup-row"><div className="setting-icon"><Download size={18}/></div><div className="setting-copy"><b>Keep a copy</b><span>Export your practices, entries, and stats as a JSON file.</span></div><button className="button button-outline compact" disabled={busy} onClick={() => void exportData()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Download size={14}/>} Export</button></div><div className="restore-block"><div className="restore-copy"><b>Restore from backup</b><span>This replaces the data currently in Phantom.</span></div><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={e => { setRestoreFile(e.target.files?.[0] || null); setConfirmRestore(false); setMessage(''); }}/><button className="button button-quiet compact" disabled={busy} onClick={() => fileRef.current?.click()}><ArrowDown size={14}/> Choose file</button>{restoreFile && <div className="restore-file"><FileText size={14}/><span>{restoreFile.name}</span>{!confirmRestore ? <button className="text-button" onClick={() => setConfirmRestore(true)}>Continue</button> : <button className="text-button danger-text" disabled={busy} onClick={() => void importData()}>{busy ? 'Restoring…' : 'Replace my data'}</button>}</div>}</div>{message && <p className={`setting-message ${message.toLowerCase().includes('could not') ? 'form-error' : ''}`} role="status">{message}</p>}<div className="privacy-note"><LockKeyhole size={15}/><span>Your entries stay on this device. Backup files are yours to keep.</span></div><div className="dialog-actions"><button className="button button-quiet" onClick={onClose}>Done</button></div></Dialog>;
 }
 
 function RewardOverlay({ reward, onClose }: { reward: Reward; onClose: () => void }) {
